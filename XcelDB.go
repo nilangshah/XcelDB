@@ -1,19 +1,39 @@
-package main
+package XcelDB
 
 import (
-	"bufio"
-	"flag"
+	//"bufio"
+	"encoding/xml"
+	//"flag"
+	"encoding/json"
 	"fmt"
 	"github.com/nilangshah/Raft"
 	"github.com/nilangshah/Raft/cluster"
-	"io"
-	"net"
+	//"io"
+	"bytes"
+	"encoding/gob"
+	"io/ioutil"
+	//"net"
+	"net/http"
 	"os"
-	"strconv"
+	//"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+type Jsonobject struct {
+	Object ObjectType
+}
+
+type ObjectType struct {
+	Servers       []ServerInfo
+	No_of_servers uint64
+}
+
+type ServerInfo struct {
+	Id   uint64
+	Host string
+}
 
 func GetPath() string {
 	data := os.Environ()
@@ -35,160 +55,171 @@ func getkeyval(item string) (key, val string) {
 	return
 }
 
-type GoDB struct {
+type StateMachine struct {
 	sync.RWMutex
 	kvMap map[string][]byte
 }
 
-var goDB *GoDB
-var replicator Raft.Replicator
+type XcelDB struct {
+	xcelId         uint64
+	xcelSM         *StateMachine
+	xcelServer     *http.Server
+	xcelReplicator Raft.Replicator
+	xcelPeers      []uint64
+	xcelPeermap    map[uint64]string
+}
 
-func main() {
+//var replicator Raft.Replicator
 
-	myid := flag.Int("id", 1, "a int")
-	flag.Parse()
-	logfile := os.Getenv("GOPATH") + "/src/github.com/nilangshah/Raft/Raftlog/log" + strconv.Itoa(*myid)
-	path := GetPath() + "/src/github.com/nilangshah/Raft/cluster/config.json"
-	f, err := os.OpenFile(logfile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		panic(fmt.Sprintf("error opening file: %v", err))
-	} else {
-		//defer f.Close()
+func ApplyCommandTOSM(xcel *Xcel) {
+	switch xcel.Command {
 
-	}
-	port := 14130
-	server1 := cluster.New(*myid, path)
-	replicator := Raft.New(server1, f, path)
-	replicator.Start()
-	fmt.Println(*myid)
-	fmt.Println("hiii")
+	case "GET":
+		xcelDB.xcelSM.RLock()
+		key := xcel.Key
+		val, ok := xcelDB.xcelSM.kvMap[string(key)]
+		if ok {
+			xcel.Value = val
+			xcel.ServerResponse = true
 
-	goDB = New()
-	done := false
-	var listener net.Listener
-	select {
-	case <-time.After(5 * time.Second):
-		if replicator.IsLeader() {
+		} else {
+			xcel.Value = []byte("NIL")
+			xcel.ServerResponse = false
 
-			fmt.Println("start listen")
-			listener, err = net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port+*myid))
-			if err != nil {
-				panic("Error listening on" + strconv.Itoa(port+*myid) + err.Error())
+		}
+		xcelDB.xcelSM.RUnlock()
 
+	case "SET":
+		var buf bytes.Buffer
+		enc := gob.NewEncoder(&buf)
+		err := enc.Encode(xcel)
+		if err != nil {
+			panic("gob error: " + err.Error())
+		}
+		response := make(chan bool)
+		command := Raft.CommandTuple{Command: []byte(buf.String()), CommandResponse: response}
+		(xcelDB.xcelReplicator).Outbox() <- command
+		select {
+		case t := <-response:
+			if t {
+				xcelDB.xcelSM.Lock()
+				key := xcel.Key
+				val := xcel.Value
+				xcelDB.xcelSM.kvMap[string(key)] = []byte(val)
+				xcel.ServerResponse = true
+
+				xcelDB.xcelSM.Unlock()
 			} else {
-				done = true
+				xcel.ServerResponse = false
+
 			}
 
 		}
-	}
-	out := make(chan int)
-	//listener:=new(net.Listener)
-	if done {
-		for {
 
-			netconn, err := listener.Accept()
-			if err != nil {
-				panic("Accept error: " + err.Error())
+	case "DELETE":
+		var buf bytes.Buffer
+		enc := gob.NewEncoder(&buf)
+		err := enc.Encode(xcel)
+		if err != nil {
+			panic("gob error: " + err.Error())
+		}
+		response := make(chan bool)
+		command := Raft.CommandTuple{Command: []byte(buf.String()), CommandResponse: response}
+		(xcelDB.xcelReplicator).Outbox() <- command
+		select {
+		case t := <-response:
+			if t {
+				xcelDB.xcelSM.Lock()
+				key := xcel.Key
+				delete(xcelDB.xcelSM.kvMap, string(key))
+				xcel.ServerResponse = true
+
+				xcelDB.xcelSM.Unlock()
+			} else {
+				xcel.ServerResponse = false
 			}
 
-			go handleConn(netconn, &replicator)
 		}
-	} else {
-		<-out
+
 	}
 
 }
 
-func New() *GoDB {
-	d := &GoDB{
+func kvHandler(w http.ResponseWriter, r *http.Request) {
+	var xcel Xcel
+
+	body, _ := ioutil.ReadAll(r.Body)
+	xml.Unmarshal(body, &xcel)
+	ApplyCommandTOSM(&xcel)
+	responseXML, _ := xml.Marshal(xcel)
+	fmt.Fprintf(w, string(responseXML))
+}
+
+type Xcel struct {
+	Command        string
+	Key            []byte
+	Value          []byte
+	ServerResponse bool
+}
+
+func NewStateMachine() *StateMachine {
+	d := &StateMachine{
 		kvMap: map[string][]byte{},
 	}
-
 	return d
 }
 
-/*
-* Networking
- */
-func handleConn(conn net.Conn, replicator *Raft.Replicator) {
-	defer conn.Close()
-	fmt.Println("hiii")
-	reader := bufio.NewReader(conn)
-	for {
+var xcelDB *XcelDB
 
-		// Fetch
+func NewServer(xcelId uint64, configFname string, clusterConfname string, raftLogPath string) {
 
-		content, err := reader.ReadString('\n')
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			fmt.Println(err)
-			return
-		}
+	//intialize state machine
+	xcelSM := NewStateMachine()
 
-		content = content[:len(content)-1] // Chop \n
-
-		// Handle
-
-		subContent := strings.Split(content, " ")
-		cmd := subContent[0]
-		switch cmd {
-
-		case "get":
-			goDB.RLock()
-			key := subContent[1]
-			val, ok := goDB.kvMap[key]
-			if ok {
-				conn.Write([]uint8(string(val) + "\r\n"))
-			} else {
-				conn.Write([]uint8("NIL\r\n"))
-			}
-			goDB.RUnlock()
-			continue
-		case "set":
-
-			response := make(chan bool)
-			command := Raft.CommandTuple{Command: []byte(content), CommandResponse: response}
-			(*replicator).Outbox() <- command
-			select {
-			case t := <-response:
-				if t {
-					goDB.Lock()
-					key := subContent[1]
-					val := subContent[2]
-					goDB.kvMap[key] = []byte(val)
-					conn.Write([]uint8("STORED\r\n"))
-					goDB.Unlock()
-				} else {
-					conn.Write([]uint8("FAILED.. PLEASE RETRY\r\n"))
-				}
-
-			}
-			continue
-		case "delete":
-
-			response := make(chan bool)
-			command := Raft.CommandTuple{Command: []byte(content), CommandResponse: response}
-			(*replicator).Outbox() <- command
-			select {
-			case t := <-response:
-				if t {
-					goDB.Lock()
-					key := subContent[1]
-					delete(goDB.kvMap, key)
-					conn.Write([]uint8("DELETED\r\n"))
-
-					goDB.Unlock()
-				} else {
-					conn.Write([]uint8("FAILED.. PLEASE RETRY\r\n"))
-				}
-
-			}
-			continue
-		case "quit":
-			break
-
-		}
-		break
+	// initialize http server
+	xcelS := &http.Server{
+		Addr:           ":12345",
+		ReadTimeout:    10 * time.Second,
+		WriteTimeout:   10 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
+	http.HandleFunc("/", kvHandler)
+
+	//start http server
+	go xcelS.ListenAndServe()
+
+	//intialize replicator
+	xcelCluster := cluster.New(int(xcelId), clusterConfname)
+	xcelReplicator := Raft.New(xcelCluster, raftLogPath)
+	xcelReplicator.Start()
+
+	//intialize xceldb
+	xcelDB := &XcelDB{
+		xcelId:         xcelId,
+		xcelSM:         xcelSM,
+		xcelServer:     xcelS,
+		xcelReplicator: xcelReplicator,
+	}
+
+	//read config file
+	var Jsontype Jsonobject
+	file, e := ioutil.ReadFile(configFname)
+	if e != nil {
+		panic("File error: " + e.Error())
+	}
+
+	json.Unmarshal(file, &Jsontype)
+
+	// store configuration
+	count := 0
+	for i := range Jsontype.Object.Servers {
+		if Jsontype.Object.Servers[i].Id == xcelId {
+		} else {
+			xcelDB.xcelPeers[count] = Jsontype.Object.Servers[i].Id
+			count++
+		}
+		xcelDB.xcelPeermap[Jsontype.Object.Servers[i].Id] = Jsontype.Object.Servers[i].Host
+
+	}
+
 }
