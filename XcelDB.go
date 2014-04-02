@@ -204,7 +204,7 @@ func ListenInBox(Replicator Raft.Replicator) {
 		select {
 		case t := <-Replicator.Inbox():
 			count++
-
+			fmt.Println("enter receinved:", count)
 			buf := bytes.NewBufferString(string(*t))
 			dec := gob.NewDecoder(buf)
 
