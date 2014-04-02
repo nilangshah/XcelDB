@@ -20,6 +20,6 @@ Requirements
 
 Usage
 ===== 
-* Install Raft from github.com/nilangshah/Raft (see usgae instruction of Raft)
+* Install Raft from github.com/nilangshah/Raft (see usage instruction of Raft)
 * Run tests to test XcelDB 
  * Make
