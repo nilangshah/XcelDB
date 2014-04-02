@@ -36,7 +36,7 @@ func TestXcelDB(t *testing.T) {
 		cmd[i-1].Start()
 	}
 	select {
-	case <-time.After(14 * time.Second):
+	case <-time.After(4 * time.Second):
 	}
 
 	sem = new(counter)
