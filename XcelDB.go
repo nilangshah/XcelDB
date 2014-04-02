@@ -1,10 +1,10 @@
-package XcelDB
+package main
 
 import (
 	//"bufio"
 	"encoding/xml"
-	//"flag"
-	"encoding/json"
+	"flag"
+	//"log"
 	"fmt"
 	"github.com/nilangshah/Raft"
 	"github.com/nilangshah/Raft/cluster"
@@ -12,13 +12,20 @@ import (
 	"bytes"
 	"encoding/gob"
 	"io/ioutil"
+	"strconv"
 	//"net"
 	"net/http"
 	"os"
-	//"strconv"
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	leaderUnknown = -2
+	leaderNotMe   = -1
+	updateFailed  = 1
+	updateSuccess = 0
 )
 
 type Jsonobject struct {
@@ -63,7 +70,6 @@ type StateMachine struct {
 type XcelDB struct {
 	xcelId         uint64
 	xcelSM         *StateMachine
-	xcelServer     *http.Server
 	xcelReplicator Raft.Replicator
 	xcelPeers      []uint64
 	xcelPeermap    map[uint64]string
@@ -80,11 +86,11 @@ func ApplyCommandTOSM(xcel *Xcel) {
 		val, ok := xcelDB.xcelSM.kvMap[string(key)]
 		if ok {
 			xcel.Value = val
-			xcel.ServerResponse = true
+			xcel.ServerResponse = updateSuccess
 
 		} else {
 			xcel.Value = []byte("NIL")
-			xcel.ServerResponse = false
+			xcel.ServerResponse = updateFailed
 
 		}
 		xcelDB.xcelSM.RUnlock()
@@ -106,11 +112,11 @@ func ApplyCommandTOSM(xcel *Xcel) {
 				key := xcel.Key
 				val := xcel.Value
 				xcelDB.xcelSM.kvMap[string(key)] = []byte(val)
-				xcel.ServerResponse = true
+				xcel.ServerResponse = updateSuccess
 
 				xcelDB.xcelSM.Unlock()
 			} else {
-				xcel.ServerResponse = false
+				xcel.ServerResponse = updateFailed
 
 			}
 
@@ -132,11 +138,11 @@ func ApplyCommandTOSM(xcel *Xcel) {
 				xcelDB.xcelSM.Lock()
 				key := xcel.Key
 				delete(xcelDB.xcelSM.kvMap, string(key))
-				xcel.ServerResponse = true
+				xcel.ServerResponse = updateSuccess
 
 				xcelDB.xcelSM.Unlock()
 			} else {
-				xcel.ServerResponse = false
+				xcel.ServerResponse = updateFailed
 			}
 
 		}
@@ -147,19 +153,41 @@ func ApplyCommandTOSM(xcel *Xcel) {
 
 func kvHandler(w http.ResponseWriter, r *http.Request) {
 	var xcel Xcel
-
-	body, _ := ioutil.ReadAll(r.Body)
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		fmt.Println(err)
+	}
 	xml.Unmarshal(body, &xcel)
-	ApplyCommandTOSM(&xcel)
+	fmt.Println(xcel)
+	if xcelDB.xcelReplicator.IsLeader() {
+		fmt.Println(xcelDB.xcelId, ":  ", xcel)
+		ApplyCommandTOSM(&xcel)
+		//xcel.ServerResponse = true
+		responseXML, _ := xml.Marshal(xcel)
+		fmt.Fprintf(w, string(responseXML))
+	} else {
+
+		leader := xcelDB.xcelReplicator.GetLeader()
+		if leader == 0 {
+			xcel.ServerResponse = leaderUnknown
+			xcel.Leader = "unknown"
+		} else {
+			xcel.ServerResponse = leaderNotMe
+			xcel.Leader = "http://" + xcelDB.xcelPeermap[leader]
+
+		}
+	}
 	responseXML, _ := xml.Marshal(xcel)
 	fmt.Fprintf(w, string(responseXML))
+
 }
 
 type Xcel struct {
 	Command        string
 	Key            []byte
 	Value          []byte
-	ServerResponse bool
+	ServerResponse int
+	Leader         string
 }
 
 func NewStateMachine() *StateMachine {
@@ -169,37 +197,80 @@ func NewStateMachine() *StateMachine {
 	return d
 }
 
+func ListenInBox(Replicator Raft.Replicator) {
+	count := 0
+	var xcel Xcel
+	for {
+		select {
+		case t := <-Replicator.Inbox():
+			count++
+
+			buf := bytes.NewBufferString(string(*t))
+			dec := gob.NewDecoder(buf)
+
+			err := dec.Decode(&xcel)
+			if err != nil {
+				panic(fmt.Sprintf("decode:", err))
+			} else {
+				ApplyOldCommandTOSM(&xcel)
+
+			}
+
+		}
+	}
+
+}
+
+func ApplyOldCommandTOSM(xcel *Xcel) {
+	switch xcel.Command {
+	case "SET":
+		xcelDB.xcelSM.Lock()
+		key := xcel.Key
+		val := xcel.Value
+		xcelDB.xcelSM.kvMap[string(key)] = []byte(val)
+		xcelDB.xcelSM.Unlock()
+	case "DELETE":
+		xcelDB.xcelSM.Lock()
+		key := xcel.Key
+		delete(xcelDB.xcelSM.kvMap, string(key))
+		xcelDB.xcelSM.Unlock()
+	}
+}
+
 var xcelDB *XcelDB
 
-func NewServer(xcelId uint64, configFname string, clusterConfname string, raftLogPath string) {
+func main() {
 
+	var Cluster cluster.Server
+	var Replicator Raft.Replicator
+	Id := flag.Int("id", 1, "a int")
+	flag.Parse()
+	configFname := GetPath() + "/src/github.com/nilangshah/XcelDB/config.xml"
+	Confname := GetPath() + "/src/github.com/nilangshah/Raft/cluster/config.json"
+	LogPath := GetPath() + "/src/github.com/nilangshah/XcelDB/Raftlog" + strconv.Itoa(*Id)
+
+	fmt.Println("Start new server")
 	//intialize state machine
 	xcelSM := NewStateMachine()
 
-	// initialize http server
-	xcelS := &http.Server{
-		Addr:           ":12345",
-		ReadTimeout:    10 * time.Second,
-		WriteTimeout:   10 * time.Second,
-		MaxHeaderBytes: 1 << 20,
+	//intialize replicator and cluster
+	Cluster = cluster.New(*Id, Confname)
+	Replicator = Raft.New(Cluster, LogPath)
+
+	// listen inbox for past commited commands
+	go ListenInBox(Replicator)
+
+	//initialize db
+	xcelDB = &XcelDB{
+		xcelId:         uint64(*Id),
+		xcelSM:         xcelSM,
+		xcelReplicator: Replicator,
 	}
-	http.HandleFunc("/", kvHandler)
 
-	//start http server
-	go xcelS.ListenAndServe()
-
-	//intialize replicator
-	xcelCluster := cluster.New(int(xcelId), clusterConfname)
-	xcelReplicator := Raft.New(xcelCluster, raftLogPath)
-	xcelReplicator.Start()
+	//start replicator
+	Replicator.Start()
 
 	//intialize xceldb
-	xcelDB := &XcelDB{
-		xcelId:         xcelId,
-		xcelSM:         xcelSM,
-		xcelServer:     xcelS,
-		xcelReplicator: xcelReplicator,
-	}
 
 	//read config file
 	var Jsontype Jsonobject
@@ -208,12 +279,15 @@ func NewServer(xcelId uint64, configFname string, clusterConfname string, raftLo
 		panic("File error: " + e.Error())
 	}
 
-	json.Unmarshal(file, &Jsontype)
-
+	xml.Unmarshal(file, &Jsontype)
+	//fmt.Println(xml.Marshal(&Jsontype))
 	// store configuration
 	count := 0
+	xcelDB.xcelPeers = make([]uint64, len(Jsontype.Object.Servers))
+	xcelDB.xcelPeermap = make(map[uint64]string, len(Jsontype.Object.Servers))
 	for i := range Jsontype.Object.Servers {
-		if Jsontype.Object.Servers[i].Id == xcelId {
+		if Jsontype.Object.Servers[i].Id == uint64(*Id) {
+
 		} else {
 			xcelDB.xcelPeers[count] = Jsontype.Object.Servers[i].Id
 			count++
@@ -221,5 +295,14 @@ func NewServer(xcelId uint64, configFname string, clusterConfname string, raftLo
 		xcelDB.xcelPeermap[Jsontype.Object.Servers[i].Id] = Jsontype.Object.Servers[i].Host
 
 	}
+
+	//start http server
+	http.HandleFunc("/", kvHandler)
+	select {
+	case <-time.After(2 * time.Second):
+		fmt.Println(xcelDB.xcelReplicator.IsRunning())
+
+	}
+	http.ListenAndServe(xcelDB.xcelPeermap[uint64(*Id)], nil)
 
 }
