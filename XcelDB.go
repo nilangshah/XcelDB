@@ -246,7 +246,7 @@ func main() {
 	Id := flag.Int("id", 1, "a int")
 	flag.Parse()
 	configFname := GetPath() + "/src/github.com/nilangshah/XcelDB/config.xml"
-	Confname := GetPath() + "/src/github.com/nilangshah/Raft/cluster/config.json"
+	Confname := GetPath() + "/src/github.com/nilangshah/XcelDB/c_config.xml"
 	LogPath := GetPath() + "/src/github.com/nilangshah/XcelDB/Raftlog" + strconv.Itoa(*Id)
 
 	fmt.Println("Start new server")
@@ -303,6 +303,7 @@ func main() {
 		fmt.Println(xcelDB.xcelReplicator.IsRunning())
 
 	}
+	fmt.Println(xcelDB.xcelPeermap[uint64(*Id)])
 	http.ListenAndServe(xcelDB.xcelPeermap[uint64(*Id)], nil)
 
 }

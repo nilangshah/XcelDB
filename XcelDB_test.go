@@ -24,14 +24,16 @@ var sem *counter
 var getPassed int
 var setPassed int
 var leaderURl string
+var nos int
 
 func TestXcelDB(t *testing.T) {
 	leaderURl = "http://127.0.0.1:14961"
-	cmd := make([]*exec.Cmd, 5)
+	nos = 3
+	cmd := make([]*exec.Cmd, nos)
 	//compeletepath := os.Getenv("GOPATH")
 	path := GetPath() + "/bin/XcelDB"
 
-	for i := 1; i < 6; i++ {
+	for i := 1; i < nos+1; i++ {
 		cmd[i-1] = exec.Command(path, "-id", strconv.Itoa(i))
 		cmd[i-1].Start()
 	}
@@ -64,7 +66,7 @@ func TestXcelDB(t *testing.T) {
 }
 
 func kill_all_server(cmd []*exec.Cmd) {
-	for i := 1; i < 6; i++ {
+	for i := 1; i < nos; i++ {
 		cmd[i-1].Process.Kill()
 		cmd[i-1].Wait()
 	}
