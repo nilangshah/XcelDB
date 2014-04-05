@@ -27,12 +27,13 @@ var leaderURl string
 var nos int
 
 func TestXcelDB(t *testing.T) {
+	//change this url if u change url in config file
 	leaderURl = "http://127.0.0.1:14961"
+	// change the nos if u want to chnage the no of servers in cluster, this should be same as no of server in config file
 	nos = 3
 	cmd := make([]*exec.Cmd, nos)
-	//compeletepath := os.Getenv("GOPATH")
 	path := GetPath() + "/bin/XcelDB"
-
+	// start all server
 	for i := 1; i < nos+1; i++ {
 		cmd[i-1] = exec.Command(path, "-id", strconv.Itoa(i))
 		cmd[i-1].Start()
@@ -40,7 +41,7 @@ func TestXcelDB(t *testing.T) {
 	select {
 	case <-time.After(4 * time.Second):
 	}
-
+	//set values 
 	sem = new(counter)
 	for j := 0; j < 450; j++ {
 		wg.Add(1)
@@ -49,6 +50,7 @@ func TestXcelDB(t *testing.T) {
 	}
 
 	wg.Wait()
+	// get values
 	for j := 0; j < 450; j++ {
 		wg.Add(1)
 		go getValues(j)

@@ -1,21 +1,17 @@
 package main
 
 import (
-	//"bufio"
+	"bytes"
+	"encoding/gob"
 	"encoding/xml"
 	"flag"
-	//"log"
 	"fmt"
 	"github.com/nilangshah/Raft"
 	"github.com/nilangshah/Raft/cluster"
-	//"io"
-	"bytes"
-	"encoding/gob"
 	"io/ioutil"
-	"strconv"
-	//"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,15 +64,14 @@ type StateMachine struct {
 }
 
 type XcelDB struct {
-	xcelId         uint64
-	xcelSM         *StateMachine
-	xcelReplicator Raft.Replicator
-	xcelPeers      []uint64
-	xcelPeermap    map[uint64]string
+	xcelId         uint64            //id of server
+	xcelSM         *StateMachine     // state machine
+	xcelReplicator Raft.Replicator   // raft replicator
+	xcelPeers      []uint64          // id of all peers
+	xcelPeermap    map[uint64]string // address of all peers
 }
 
-//var replicator Raft.Replicator
-
+// apply command to state machine
 func ApplyCommandTOSM(xcel *Xcel) {
 	switch xcel.Command {
 
@@ -151,6 +146,7 @@ func ApplyCommandTOSM(xcel *Xcel) {
 
 }
 
+//http handler to handle http request
 func kvHandler(w http.ResponseWriter, r *http.Request) {
 	var xcel Xcel
 	body, err := ioutil.ReadAll(r.Body)
@@ -182,6 +178,7 @@ func kvHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
+//client must send object of xcel as http post to communicate with XcelDBs
 type Xcel struct {
 	Command        string
 	Key            []byte
@@ -190,6 +187,7 @@ type Xcel struct {
 	Leader         string
 }
 
+//initialize new state machine
 func NewStateMachine() *StateMachine {
 	d := &StateMachine{
 		kvMap: map[string][]byte{},
@@ -197,6 +195,7 @@ func NewStateMachine() *StateMachine {
 	return d
 }
 
+//all past commited command will come into replicators inbox
 func ListenInBox(Replicator Raft.Replicator) {
 	count := 0
 	var xcel Xcel
@@ -239,6 +238,7 @@ func ApplyOldCommandTOSM(xcel *Xcel) {
 
 var xcelDB *XcelDB
 
+// create new xceldb
 func main() {
 
 	var Cluster cluster.Server
@@ -249,7 +249,6 @@ func main() {
 	Confname := GetPath() + "/src/github.com/nilangshah/XcelDB/c_config.xml"
 	LogPath := GetPath() + "/src/github.com/nilangshah/XcelDB/Raftlog" + strconv.Itoa(*Id)
 
-	fmt.Println("Start new server")
 	//intialize state machine
 	xcelSM := NewStateMachine()
 
@@ -303,7 +302,6 @@ func main() {
 		fmt.Println(xcelDB.xcelReplicator.IsRunning())
 
 	}
-	fmt.Println(xcelDB.xcelPeermap[uint64(*Id)])
 	http.ListenAndServe(xcelDB.xcelPeermap[uint64(*Id)], nil)
 
 }
